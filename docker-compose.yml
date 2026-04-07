@@ -1,5 +1,6 @@
 services:
   app:
+    image: ${APP_IMAGE:-ghcr.io/soein/any-auto-register:latest}
     build:
       context: .
       dockerfile: Dockerfile
