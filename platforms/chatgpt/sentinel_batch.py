@@ -335,13 +335,14 @@ class PlaywrightSentinelProvider(SentinelProvider):
             viewport={"width": 1920, "height": 1080},
             ignore_https_errors=True,
         )
+        # MODIFIED BY Soein fork for bug #12:
+        # Playwright add_cookies 不允许同时传 url 和 path，移除 path，url 已自带 path=/
         self._context.add_cookies(
             [
                 {
                     "name": "oai-did",
                     "value": self._device_id,
                     "url": "https://sentinel.openai.com/",
-                    "path": "/",
                     "secure": True,
                     "sameSite": "Lax",
                 },
@@ -349,7 +350,6 @@ class PlaywrightSentinelProvider(SentinelProvider):
                     "name": "oai-did",
                     "value": self._device_id,
                     "url": "https://auth.openai.com/",
-                    "path": "/",
                     "secure": True,
                     "sameSite": "Lax",
                 },

@@ -345,13 +345,17 @@ def get_sentinel_token_via_browser(
             )
             if device_id:
                 try:
+                    # MODIFIED BY Soein fork for bug #12:
+                    # Playwright 的 add_cookies 不允许同时传 url 和 path，
+                    # 必须二选一（给 url 时 url 自带 path；给 domain 时需要配对 path）。
+                    # 原代码同时传 url 和 path 会抛 "Cookie should have either url or path"，
+                    # 导致 cookies 没加进去，后续 OAuth 请求缺 oai-did header 触发 Cloudflare 拦截。
                     context.add_cookies(
                         [
                             {
                                 "name": "oai-did",
                                 "value": str(device_id),
                                 "url": "https://auth.openai.com/",
-                                "path": "/",
                                 "secure": True,
                                 "sameSite": "Lax",
                             }
