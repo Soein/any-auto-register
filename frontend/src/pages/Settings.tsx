@@ -71,6 +71,10 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'AT（Access Token，推荐）', value: 'at' },
     { label: 'RT（Refresh Token）', value: 'rt' },
   ],
+  external_apps_update_mode: [
+    { label: 'latest semver tag（推荐）', value: 'tag' },
+    { label: '分支 HEAD', value: 'branch' },
+  ],
 }
 
 const TAB_ITEMS = [
@@ -793,6 +797,7 @@ function IntegrationsPanel() {
   const [items, setItems] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState('')
+  const [updateMode, setUpdateMode] = useState<'tag' | 'branch'>('tag')
   const saved = false
   const [resultModal, setResultModal] = useState({
     open: false,
@@ -813,8 +818,13 @@ function IntegrationsPanel() {
   const load = async () => {
     setLoading(true)
     try {
-      const d = await apiFetch('/integrations/services')
+      const [d, cfg] = await Promise.all([
+        apiFetch('/integrations/services'),
+        apiFetch('/config'),
+      ])
       setItems(d.items || [])
+      const mode = String(cfg?.external_apps_update_mode || 'tag').trim().toLowerCase()
+      setUpdateMode(mode === 'branch' ? 'branch' : 'tag')
     } finally {
       setLoading(false)
     }
@@ -854,6 +864,22 @@ function IntegrationsPanel() {
     } catch (e: any) {
       message.error(e?.message || `${label} 回填失败`)
       showResultModal(`${label} 回填结果`, e?.message || e || `${label} 回填失败`, false)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const updateInstallMode = async (nextMode: 'tag' | 'branch') => {
+    setBusy('update-mode')
+    try {
+      await apiFetch('/config', {
+        method: 'PUT',
+        body: JSON.stringify({ data: { external_apps_update_mode: nextMode } }),
+      })
+      setUpdateMode(nextMode)
+      message.success(nextMode === 'tag' ? '已切换到 tag 模式' : '已切换到分支模式')
+    } catch (e: any) {
+      message.error(e?.message || '切换失败')
     } finally {
       setBusy('')
     }
@@ -919,6 +945,24 @@ function IntegrationsPanel() {
         </pre>
       </Modal>
 
+      <Card title="安装/更新策略">
+        <Space wrap align="center">
+          <Select
+            style={{ width: 320 }}
+            value={updateMode}
+            options={SELECT_FIELDS.external_apps_update_mode}
+            onChange={(value) => setUpdateMode(value as 'tag' | 'branch')}
+          />
+          <Button
+            type="primary"
+            loading={busy === 'update-mode'}
+            onClick={() => updateInstallMode(updateMode)}
+          >
+            保存策略
+          </Button>
+        </Space>
+      </Card>
+
       <Card title="批量操作">
         <Space wrap>
           <Button loading={busy === 'start-all'} onClick={() => doAction('start-all', apiFetch('/integrations/services/start-all', { method: 'POST' }))}>
@@ -964,9 +1008,16 @@ function IntegrationsPanel() {
                   loading={busy === `install-${item.name}`}
                   onClick={() => doAction(`install-${item.name}`, apiFetch(`/integrations/services/${item.name}/install`, { method: 'POST' }))}
                 >
-                  安装
+                  安装最新版
                 </Button>
-              ) : null}
+              ) : (
+                <Button
+                  loading={busy === `install-${item.name}`}
+                  onClick={() => doAction(`install-${item.name}`, apiFetch(`/integrations/services/${item.name}/install`, { method: 'POST' }))}
+                >
+                  更新到最新版
+                </Button>
+              )}
               <Button
                 loading={busy === `start-${item.name}`}
                 disabled={!item.repo_exists}
@@ -979,6 +1030,21 @@ function IntegrationsPanel() {
                 onClick={() => doAction(`stop-${item.name}`, apiFetch(`/integrations/services/${item.name}/stop`, { method: 'POST' }))}
               >
                 停止
+              </Button>
+              <Button
+                danger
+                loading={busy === `uninstall-${item.name}`}
+                disabled={!item.repo_exists}
+                onClick={() => {
+                  const ok = window.confirm(`确认卸载 ${item.label}？\n会停止服务并删除本地插件目录。`)
+                  if (!ok) return
+                  doAction(
+                    `uninstall-${item.name}`,
+                    apiFetch(`/integrations/services/${item.name}/uninstall`, { method: 'POST' }),
+                  )
+                }}
+              >
+                卸载
               </Button>
               {item.name === 'grok2api' ? (
                 <Button

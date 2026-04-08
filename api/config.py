@@ -96,6 +96,7 @@ CONFIG_KEYS = [
     "grok2api_quota",
     "kiro_manager_path",
     "kiro_manager_exe",
+    "external_apps_update_mode",
     "contribution_enabled",
     "contribution_server_url",
     "contribution_key",
@@ -136,6 +137,8 @@ def get_config():
         all_cfg["contribution_enabled"] = "0"
     if not all_cfg.get("contribution_server_url"):
         all_cfg["contribution_server_url"] = "http://new.xem8k5.top:7317/"
+    if not all_cfg.get("external_apps_update_mode"):
+        all_cfg["external_apps_update_mode"] = "tag"
     # 只返回已知 key，未设置的返回空字符串
     return {k: all_cfg.get(k, "") for k in CONFIG_KEYS}
 
