@@ -53,6 +53,9 @@ class BaseMailbox(ABC):
         deadline = time.monotonic() + timeout_seconds
 
         while time.monotonic() < deadline:
+            # MODIFIED BY Soein fork for bug #11: 检查停止标记，注册完成后提前退出轮询
+            if getattr(self, "_polling_stopped", False):
+                raise RuntimeError("polling stopped by task runner")
             self._checkpoint()
             code = poll_once()
             if code:
@@ -65,6 +68,15 @@ class BaseMailbox(ABC):
 
         self._checkpoint()
         raise TimeoutError(timeout_message or f"等待验证码超时 ({timeout_seconds}s)")
+
+    def stop_polling(self) -> None:
+        """MODIFIED BY Soein fork for bug #11:
+        通知正在运行的 _run_polling_wait 循环提前退出。
+        task runner 在注册任务 finally 里调用，避免注册完成后 IMAP 轮询继续刷流量。"""
+        try:
+            self._polling_stopped = True
+        except Exception:
+            pass
 
     @abstractmethod
     def get_email(self) -> MailboxAccount:
@@ -3095,13 +3107,23 @@ class OutlookMailboxBackend(ABC):
 class OutlookImapMailboxBackend(OutlookMailboxBackend):
     backend_name = "imap"
 
+    @staticmethod
+    def _quote_folder(name: str) -> str:
+        # MODIFIED BY Soein fork for bug #5: IMAP 协议要求带空格的 mailbox name 用引号包裹
+        # 例如 "Deleted Items" 必须写成 '"Deleted Items"'，否则服务器返回 BAD Command Argument Error
+        if not isinstance(name, str):
+            return name
+        if '"' in name or ' ' not in name:
+            return name
+        return f'"{name}"'
+
     def get_current_ids(self, account: MailboxAccount) -> set:
         imap_conn = None
         try:
             imap_conn = self.mailbox._open_imap(account)
             seen: set[str] = set()
             for folder in self.mailbox._imap_folder_names:
-                status, _ = imap_conn.select(folder, readonly=True)
+                status, _ = imap_conn.select(self._quote_folder(folder), readonly=True)
                 if status != "OK":
                     continue
                 status, data = imap_conn.uid("search", None, "ALL")
@@ -3136,7 +3158,15 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
         from email import message_from_bytes
         from email.policy import default as email_default_policy
 
+        # MODIFIED BY Soein fork for bug #7: 跨多次 wait_for_code 调用持久化 seen 集合
+        # 防止 120s timeout retry 时所有旧邮件又被当作"新邮件"，配合 exclude_codes 触发死循环。
+        email_key = str(getattr(account, "email", "") or "")
+        if email_key:
+            persistent_seen = self.mailbox._seen_uids_by_email.setdefault(email_key, set())
+        else:
+            persistent_seen = set()
         seen = {str(mid) for mid in (before_ids or set())}
+        seen.update(persistent_seen)
         exclude_codes = {
             str(code).strip()
             for code in (kwargs.get("exclude_codes") or set())
@@ -3144,102 +3174,118 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
         }
         keyword_lower = str(keyword or "").strip().lower()
 
+        # MODIFIED BY Soein fork for bug #4:
+        # 重构 poll_once：整个 poll 周期内只登录 1 次 IMAP，依次 select 多个文件夹复用同一条连接。
+        # 原来每个文件夹都 _open_imap + logout，2 个文件夹 × 5 秒间隔 = 每分钟 24 次登录，触发微软 BasicAuthBlocked。
+        # 重构后每分钟最多 3 次登录（20 秒间隔），远低于微软的防刷阈值。
         def poll_once() -> Optional[str]:
-            for folder in self.mailbox._imap_folder_names:
-                imap_conn = None
-                try:
-                    self.mailbox._log(f"[微软邮箱][IMAP] folder={folder} 开始轮询")
-                    imap_conn = self.mailbox._open_imap(account)
-                    self.mailbox._log(f"[微软邮箱][IMAP] folder={folder} IMAP 登录成功")
-                    status, _ = imap_conn.select(folder, readonly=True)
-                    if status != "OK":
-                        self.mailbox._log(
-                            f"[微软邮箱][IMAP] folder={folder} select 失败: status={status}"
+            imap_conn = None
+            try:
+                imap_conn = self.mailbox._open_imap(account)
+                self.mailbox._log("[微软邮箱][IMAP] 登录成功，开始依次轮询文件夹")
+                for folder in self.mailbox._imap_folder_names:
+                    try:
+                        # MODIFIED BY Soein fork for bug #5: 文件夹名带空格需要引号
+                        status, _ = imap_conn.select(
+                            self._quote_folder(folder), readonly=True
                         )
-                        continue
-                    status, data = imap_conn.uid("search", None, "ALL")
-                    if status != "OK":
-                        self.mailbox._log(
-                            f"[微软邮箱][IMAP] folder={folder} search 失败: status={status}"
-                        )
-                        continue
-                    ids = data[0].split() if data and data[0] else []
-                    if len(ids) > 50:
-                        ids = ids[-50:]
-                    new_uids = []
-                    for uid in ids:
-                        uid_str = (
-                            uid.decode("utf-8", errors="ignore")
-                            if isinstance(uid, bytes)
-                            else str(uid)
-                        )
-                        seen_key = f"{folder}:{uid_str}"
-                        if not uid_str or seen_key in seen:
-                            continue
-                        seen.add(seen_key)
-                        new_uids.append(uid)
-                    self.mailbox._log(
-                        f"[微软邮箱][IMAP] folder={folder} uid_total={len(ids)} new_uid_count={len(new_uids)}"
-                    )
-                    for uid in new_uids:
-                        status, msg_data = imap_conn.uid("fetch", uid, "(RFC822)")
                         if status != "OK":
                             self.mailbox._log(
-                                f"[微软邮箱][IMAP] folder={folder} fetch 失败: uid={uid!r} status={status}"
+                                f"[微软邮箱][IMAP] folder={folder} select 失败: status={status}"
                             )
                             continue
-                        raw = None
-                        for item in msg_data or []:
-                            if isinstance(item, tuple) and item[1]:
-                                raw = item[1]
-                                break
-                        if not raw:
+                        status, data = imap_conn.uid("search", None, "ALL")
+                        if status != "OK":
                             self.mailbox._log(
-                                f"[微软邮箱][IMAP] folder={folder} fetch 空响应: uid={uid!r}"
+                                f"[微软邮箱][IMAP] folder={folder} search 失败: status={status}"
                             )
                             continue
-                        msg = message_from_bytes(raw, policy=email_default_policy)
-                        subject = self.mailbox._decode_header_value(msg.get("Subject", ""))
-                        text = self.mailbox._extract_message_text(msg)
+                        ids = data[0].split() if data and data[0] else []
+                        if len(ids) > 50:
+                            ids = ids[-50:]
+                        new_uids = []
+                        for uid in ids:
+                            uid_str = (
+                                uid.decode("utf-8", errors="ignore")
+                                if isinstance(uid, bytes)
+                                else str(uid)
+                            )
+                            seen_key = f"{folder}:{uid_str}"
+                            if not uid_str or seen_key in seen:
+                                continue
+                            seen.add(seen_key)
+                            # MODIFIED BY Soein fork for bug #7: 同步到持久化集合
+                            persistent_seen.add(seen_key)
+                            new_uids.append(uid)
                         self.mailbox._log(
-                            f"[微软邮箱][IMAP] folder={folder} 命中新邮件 subject={subject or '-'}"
+                            f"[微软邮箱][IMAP] folder={folder} uid_total={len(ids)} new_uid_count={len(new_uids)}"
                         )
-                        if keyword_lower and keyword_lower not in text.lower():
+                        for uid in new_uids:
+                            status, msg_data = imap_conn.uid("fetch", uid, "(RFC822)")
+                            if status != "OK":
+                                self.mailbox._log(
+                                    f"[微软邮箱][IMAP] folder={folder} fetch 失败: uid={uid!r} status={status}"
+                                )
+                                continue
+                            raw = None
+                            for item in msg_data or []:
+                                if isinstance(item, tuple) and item[1]:
+                                    raw = item[1]
+                                    break
+                            if not raw:
+                                self.mailbox._log(
+                                    f"[微软邮箱][IMAP] folder={folder} fetch 空响应: uid={uid!r}"
+                                )
+                                continue
+                            msg = message_from_bytes(raw, policy=email_default_policy)
+                            subject = self.mailbox._decode_header_value(msg.get("Subject", ""))
+                            text = self.mailbox._extract_message_text(msg)
                             self.mailbox._log(
-                                f"[微软邮箱][IMAP] folder={folder} 跳过关键字不匹配邮件"
+                                f"[微软邮箱][IMAP] folder={folder} 命中新邮件 subject={subject or '-'}"
                             )
-                            continue
-                        code = self.mailbox._safe_extract(text, code_pattern)
-                        if not code:
+                            if keyword_lower and keyword_lower not in text.lower():
+                                self.mailbox._log(
+                                    f"[微软邮箱][IMAP] folder={folder} 跳过关键字不匹配邮件"
+                                )
+                                continue
+                            code = self.mailbox._safe_extract(text, code_pattern)
+                            if not code:
+                                self.mailbox._log(
+                                    f"[微软邮箱][IMAP] folder={folder} 未提取到验证码"
+                                )
+                                continue
+                            if code in exclude_codes:
+                                self.mailbox._log(
+                                    f"[微软邮箱][IMAP] folder={folder} 跳过已尝试验证码: {code}"
+                                )
+                                continue
                             self.mailbox._log(
-                                f"[微软邮箱][IMAP] folder={folder} 未提取到验证码"
+                                f"[微软邮箱][IMAP] folder={folder} 验证码提取成功: {code}"
                             )
-                            continue
-                        if code in exclude_codes:
-                            self.mailbox._log(
-                                f"[微软邮箱][IMAP] folder={folder} 跳过已尝试验证码: {code}"
-                            )
-                            continue
+                            return code
+                    except Exception as folder_exc:
                         self.mailbox._log(
-                            f"[微软邮箱][IMAP] folder={folder} 验证码提取成功: {code}"
+                            f"[微软邮箱][IMAP] folder={folder} 文件夹查询异常: {folder_exc}"
                         )
-                        return code
-                except Exception as exc:
-                    self.mailbox._log(
-                        f"[微软邮箱][IMAP] folder={folder} IMAP 查询异常: {exc}"
-                    )
-                    continue
-                finally:
-                    try:
-                        if imap_conn:
-                            imap_conn.logout()
-                    except Exception:
-                        pass
-            return None
+                        continue
+                return None
+            except Exception as conn_exc:
+                self.mailbox._log(
+                    f"[微软邮箱][IMAP] IMAP 连接或认证异常: {conn_exc}"
+                )
+                return None
+            finally:
+                try:
+                    if imap_conn is not None:
+                        imap_conn.logout()
+                except Exception:
+                    pass
 
         return self.mailbox._run_polling_wait(
             timeout=timeout,
-            poll_interval=5,
+            # MODIFIED BY Soein fork for bug #4: 轮询间隔从 5 秒提高到 20 秒，
+            # 配合"单连接多文件夹"重构，每分钟 IMAP 登录次数从 24 次降到 3 次，避免微软 BasicAuthBlocked。
+            poll_interval=20,
             poll_once=poll_once,
         )
 
@@ -3361,7 +3407,7 @@ class OutlookMailbox(BaseMailbox):
         imap_server: str = "",
         imap_port: int | str = 993,
         token_endpoint: str = "",
-        backend: str = "graph",
+        backend: str = "imap",  # MODIFIED BY Soein fork for bug #1: 默认用 IMAP，因为号商的 client_id 通常只有 IMAP scope
         graph_api_base: str = "",
         proxy: str = None,
     ):
@@ -3396,20 +3442,44 @@ class OutlookMailbox(BaseMailbox):
         self._graph_api_base = (
             str(graph_api_base or "").strip() or "https://graph.microsoft.com/v1.0"
         )
-        self._imap_folder_names = ["INBOX", "Junk", "Deleted Items", "Trash"]
+        # MODIFIED BY Soein fork for bug #6: 只留 INBOX + Junk。
+        # "Trash" 在 Microsoft 邮箱不存在（微软用 "Deleted Items"），"Deleted Items" 带空格有引号 bug，
+        # 且 OTP 基本都在 INBOX/Junk，扫这两个足够，同时减少 IMAP 登录次数避免微软防刷。
+        self._imap_folder_names = ["INBOX", "Junk"]
         self._graph_folder_names = ["inbox", "junkemail", "deleteditems"]
         self._backends: dict[str, OutlookMailboxBackend] = {
             "imap": OutlookImapMailboxBackend(self),
             "graph": OutlookGraphMailboxBackend(self),
         }
+        # MODIFIED BY Soein fork for bug #7:
+        # 跨 wait_for_code 多次调用持久化"已见过的 UID 集合"（按 email 分组）。
+        # 原本 seen 是 wait_for_code 里的局部变量，每次 retry 重置，
+        # 导致第一次 120s 等待超时后第二次调用时所有旧邮件又被当"新邮件"，
+        # 结合 tried_codes 状态会持续跳过旧 OTP，形成死循环。
+        self._seen_uids_by_email: dict[str, set] = {}
+        # MODIFIED BY Soein fork for bug #8:
+        # 记录最近一次 _pop_account 取出的邮箱地址，供 task_logs 在注册失败时回填 email 字段，
+        # 方便事后追溯"丢了哪些号"。
+        self._last_allocated_email: str = ""
+        # MODIFIED BY Soein fork for bug #11:
+        # 轮询停止标记。task runner 在注册完成（成功或失败）时调用 stop_polling()，
+        # _run_polling_wait 每次 checkpoint 会检查这个标记，提前退出轮询，避免继续刷 IMAP。
+        self._polling_stopped: bool = False
 
     @staticmethod
     def _normalize_backend_name(value: Any) -> str:
-        backend = str(value or "graph").strip().lower() or "graph"
-        return backend if backend in {"graph", "imap"} else "graph"
+        # MODIFIED BY Soein fork for bug #1: 默认 "imap" 而不是 "graph"。
+        # 号商卖的 Hotmail 的 client_id 通常只申请 IMAP/POP/SMTP scope，
+        # 走 Graph REST API 会返回 401。
+        backend = str(value or "imap").strip().lower() or "imap"
+        return backend if backend in {"graph", "imap"} else "imap"
 
     def _pop_account(self) -> dict:
+        # MODIFIED BY Soein fork for bug #3 + #9:
+        # 1. 改物理删除为软删除（enabled=False + last_used 时间戳），失败号可以通过 restore API 复活
+        # 2. 同时写一份审计日志到 /runtime/outlook_accounts_history.jsonl，方便事后追溯
         from sqlmodel import Session, select
+        from datetime import datetime, timezone
         from core.db import engine, OutlookAccountModel
 
         with self._lock:
@@ -3432,9 +3502,40 @@ class OutlookMailbox(BaseMailbox):
                     "client_id": account.client_id,
                     "refresh_token": account.refresh_token,
                 }
-                session.delete(account)
+                # 软删除：保留记录，标记为已消耗
+                now = datetime.now(timezone.utc)
+                account.enabled = False
+                account.last_used = now
+                account.updated_at = now
+                session.add(account)
                 session.commit()
-                return payload
+
+        # MODIFIED BY Soein fork for bug #8: 记录最近分配的 email，供 task runner 回填 task log
+        self._last_allocated_email = payload.get("email", "") or ""
+
+        # 审计日志（在 session 外写，避免阻塞锁）
+        try:
+            import json as _json
+            import os as _os
+            runtime_dir = _os.getenv("APP_RUNTIME_DIR", "/runtime")
+            history_path = _os.path.join(runtime_dir, "outlook_accounts_history.jsonl")
+            _os.makedirs(runtime_dir, exist_ok=True)
+            refresh_token_masked = ""
+            rt = payload.get("refresh_token") or ""
+            if rt:
+                refresh_token_masked = rt[:20] + "..." if len(rt) > 20 else rt
+            with open(history_path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps({
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "action": "pop",
+                    "email": payload.get("email"),
+                    "client_id": payload.get("client_id"),
+                    "refresh_token_prefix": refresh_token_masked,
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # 审计失败不影响主流程
+
+        return payload
 
     def get_email(self) -> MailboxAccount:
         payload = self._pop_account()

@@ -310,6 +310,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     _task_store.add_cashier_url(task_id, cashier_url)
                 return AttemptResult.success()
             except SkipCurrentAttemptRequested as e:
+                # MODIFIED BY Soein fork for bug #8: 如果 current_email 为空，尝试从 mailbox 回填
+                if not current_email:
+                    current_email = getattr(_mailbox, "_last_allocated_email", "") if "_mailbox" in locals() else ""
                 _log(task_id, f"[SKIP] 已跳过当前账号: {e}")
                 _save_task_log(
                     req.platform,
@@ -324,6 +327,10 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             except Exception as e:
                 if _proxy and proxy_pool is not None:
                     proxy_pool.report_fail(_proxy)
+                # MODIFIED BY Soein fork for bug #8: 如果 current_email 为空（注册在拿到邮箱后的阶段失败），
+                # 从 _mailbox._last_allocated_email 回填，确保 task_logs 能追溯到具体哪个号失败了。
+                if not current_email:
+                    current_email = getattr(_mailbox, "_last_allocated_email", "") if "_mailbox" in locals() else ""
                 _log(task_id, f"[FAIL] 注册失败: {e}")
                 _save_task_log(
                     req.platform,
@@ -333,6 +340,13 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 )
                 return AttemptResult.failed(str(e))
             finally:
+                # MODIFIED BY Soein fork for bug #11: 注册结束后（成功/失败/跳过），
+                # 通知 mailbox 停止 IMAP 轮询，避免继续刷流量触发微软防刷
+                try:
+                    if "_mailbox" in locals() and _mailbox is not None and hasattr(_mailbox, "stop_polling"):
+                        _mailbox.stop_polling()
+                except Exception:
+                    pass
                 control.finish_attempt(attempt_id)
 
         from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed

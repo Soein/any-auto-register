@@ -1242,6 +1242,13 @@ class OAuthClient:
             self._set_error("OAuth 注册流程缺少接码客户端")
             return None
 
+        # MODIFIED BY Soein fork for bug #2:
+        # 清空 skymail_client._used_codes，防止上一次任务的 tried codes 污染这次注册。
+        # 特别是"注册链路 → 登录链路切换"时，如果 ChatGPT 复用旧 OTP，没有这个清空会死循环。
+        if hasattr(skymail_client, "_used_codes"):
+            skymail_client._used_codes = set()
+            self._log("[注册链路] 重置 skymail_client._used_codes（防止跨任务污染）")
+
         device_id = str(device_id or "").strip() or str(uuid.uuid4())
         self.device_id = device_id
         user_agent, sec_ch_ua, impersonate = self._ensure_oauth_fingerprint(
@@ -1686,6 +1693,15 @@ class OAuthClient:
         self.last_error = ""
         self.last_workspace_id = ""
         self.last_state = FlowState()
+
+        # MODIFIED BY Soein fork for bug #2:
+        # 清空 skymail_client._used_codes，防止从注册链路切换过来时继承 tried codes。
+        # 核心死循环场景：注册链路用过 OTP "051665" → 加入 _used_codes → 切换到登录链路
+        # → ChatGPT resend 时复用同一个 051665 → 登录链路看到在 _used_codes 里直接跳过 → 永远等不到"新" OTP。
+        if skymail_client and hasattr(skymail_client, "_used_codes"):
+            skymail_client._used_codes = set()
+            self._log("[登录链路] 重置 skymail_client._used_codes（防止跨链路污染）")
+
         self._log(
             "开始 OAuth 登录流程..."
             + (f" (source={login_source})" if login_source else "")
