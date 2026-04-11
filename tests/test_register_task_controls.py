@@ -81,6 +81,27 @@ class _FakeChatGPTWorkspacePlatform(BasePlatform):
         return True
 
 
+class _FailingMailbox(_FakeMailbox):
+    def __init__(self):
+        super().__init__()
+        self._last_allocated_email = "allocated@example.com"
+
+
+class _FailingPlatform(BasePlatform):
+    name = "fake"
+    display_name = "Fake"
+
+    def __init__(self, config=None, mailbox=None):
+        super().__init__(config)
+        self.mailbox = mailbox
+
+    def register(self, email: str, password: str = None) -> Account:
+        raise RuntimeError("register boom")
+
+    def check_valid(self, account: Account) -> bool:
+        return True
+
+
 class RegisterTaskControlFlowTests(unittest.TestCase):
     def _build_request(self, **overrides):
         payload = {
@@ -95,18 +116,21 @@ class RegisterTaskControlFlowTests(unittest.TestCase):
 
     def _run_with_control(self, task_id: str, *, stop: bool = False, skip: bool = False):
         req = self._build_request()
-        _create_task_record(task_id, req, "manual", None)
-        if stop:
-            _task_store.request_stop(task_id)
-        if skip:
-            _task_store.request_skip_current(task_id)
-
         with (
+            patch("api.tasks._persist_task_snapshot"),
+            patch("core.config_store.config_store.get_all", return_value={}),
             patch("core.registry.get", return_value=_FakePlatform),
             patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
             patch("core.db.save_account", side_effect=lambda account: account),
             patch("api.tasks._save_task_log"),
+            patch("api.tasks._auto_upload_integrations"),
+            patch("core.proxy_pool.proxy_pool.report_success"),
         ):
+            _create_task_record(task_id, req, "manual", None)
+            if stop:
+                _task_store.request_stop(task_id)
+            if skip:
+                _task_store.request_skip_current(task_id)
             _run_register(task_id, req)
 
         return _task_store.snapshot(task_id)
@@ -127,25 +151,60 @@ class RegisterTaskControlFlowTests(unittest.TestCase):
         self.assertEqual(snapshot["skipped"], 0)
         self.assertEqual(snapshot["errors"], [])
 
-    def test_chatgpt_logs_workspace_progress_after_each_success(self):
+    def test_chatgpt_logs_each_success(self):
         task_id = "task-chatgpt-workspace-progress"
         req = self._build_request(platform="chatgpt", count=2, concurrency=1)
-        _create_task_record(task_id, req, "manual", None)
         _FakeChatGPTWorkspacePlatform.reset_counter()
 
         with (
+            patch("api.tasks._persist_task_snapshot"),
+            patch("core.config_store.config_store.get_all", return_value={}),
             patch("core.registry.get", return_value=_FakeChatGPTWorkspacePlatform),
             patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
             patch("core.db.save_account", side_effect=lambda account: account),
             patch("api.tasks._save_task_log"),
+            patch("api.tasks._auto_upload_integrations"),
+            patch("core.proxy_pool.proxy_pool.report_success"),
         ):
+            _create_task_record(task_id, req, "manual", None)
             _run_register(task_id, req)
 
         snapshot = _task_store.snapshot(task_id)
         joined_logs = "\n".join(snapshot["logs"])
 
-        self.assertIn("workspace进度: 1/2", joined_logs)
-        self.assertIn("workspace进度: 2/2", joined_logs)
+        self.assertIn("[OK] 注册成功: user1@example.com", joined_logs)
+        self.assertIn("[OK] 注册成功: user2@example.com", joined_logs)
+
+    def test_failure_reports_proxy_and_uses_last_allocated_email(self):
+        task_id = "task-failure-last-allocated-email"
+        req = self._build_request()
+        mailbox = _FailingMailbox()
+
+        with (
+            patch("api.tasks._persist_task_snapshot"),
+            patch("core.config_store.config_store.get_all", return_value={}),
+            patch("core.registry.get", return_value=_FailingPlatform),
+            patch("core.base_mailbox.create_mailbox", return_value=mailbox),
+            patch("core.db.save_account", side_effect=lambda account: account),
+            patch("api.tasks._save_task_log") as save_task_log_mock,
+            patch("api.tasks._auto_upload_integrations"),
+            patch("core.proxy_pool.proxy_pool.report_fail") as report_fail_mock,
+            patch("core.proxy_pool.proxy_pool.report_success"),
+        ):
+            _create_task_record(task_id, req, "manual", None)
+            _run_register(task_id, req)
+
+        snapshot = _task_store.snapshot(task_id)
+
+        report_fail_mock.assert_called_once_with("http://proxy.local:8080")
+        save_task_log_mock.assert_any_call(
+            "fake",
+            "allocated@example.com",
+            "failed",
+            error="register boom",
+        )
+        self.assertEqual(snapshot["status"], "done")
+        self.assertIn("register boom", snapshot["errors"])
 
 
 if __name__ == "__main__":
