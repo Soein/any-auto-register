@@ -947,7 +947,7 @@ class KiroRegister:
                 self._init_browser()
                 created_browser = True
             page = self._require_context().new_page()
-            page.goto(KIRO_SIGNIN_URL, wait_until="domcontentloaded")
+            page.goto(KIRO_SIGNIN_URL, wait_until="commit", timeout=60000)
             tokens = self._complete_desktop_idc_flow(
                 email=email, pwd=pwd, otp_callback=otp_callback
             )
@@ -986,7 +986,7 @@ class KiroRegister:
                 stealth_sync(page)
 
             self.log("加载 Kiro Login ...")
-            page.goto(KIRO_SIGNIN_URL, wait_until="domcontentloaded")
+            page.goto(KIRO_SIGNIN_URL, wait_until="commit", timeout=60000)
             self._human_sleep(1.9, 3.4)
 
             # Debug: dump all buttons to log
