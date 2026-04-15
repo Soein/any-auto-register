@@ -1108,11 +1108,36 @@ class KiroRegister:
             # 2. 等待邮箱后的实际下一步（某些 AWS 页面会延迟很久才出现姓名输入框）
             self.log("2. 等待姓名或 OTP 阶段...")
             stage, stage_input, stage_error = self._wait_for_post_email_step(
-                page, timeout_ms=30000
+                page, timeout_ms=60000
             )
             if stage == "error":
                 return False, {"error": f"Email 提交后 AWS 返回错误: {stage_error}"}
             if stage == "timeout":
+                try:
+                    os.makedirs("/runtime/debug", exist_ok=True)
+                    ts = int(time.time())
+                    try:
+                        self.log(f"[KIRO][DEBUG] post-email URL={page.url} title={page.title()!r}")
+                    except Exception:
+                        pass
+                    try:
+                        with open(f"/runtime/debug/kiro_post_email_{ts}.html", "w") as f:
+                            f.write(page.content())
+                        self.log(f"[KIRO][DEBUG] html=/runtime/debug/kiro_post_email_{ts}.html")
+                    except Exception as e:
+                        self.log(f"[KIRO][DEBUG] html fail: {e}")
+                    try:
+                        body_text = (page.inner_text("body") or "")[:800]
+                        self.log(f"[KIRO][DEBUG] body_text(前800): {body_text!r}")
+                    except Exception as e:
+                        self.log(f"[KIRO][DEBUG] body_text fail: {e}")
+                    try:
+                        page.screenshot(path=f"/runtime/debug/kiro_post_email_{ts}.png", full_page=False, timeout=10000, animations="disabled")
+                        self.log(f"[KIRO][DEBUG] screenshot=/runtime/debug/kiro_post_email_{ts}.png")
+                    except Exception as e:
+                        self.log(f"[KIRO][DEBUG] screenshot fail: {e}")
+                except Exception as dbg_err:
+                    self.log(f"[KIRO][DEBUG] 诊断失败: {dbg_err}")
                 return False, {"error": stage_error}
 
             otp_input = stage_input if stage == "otp" else None
