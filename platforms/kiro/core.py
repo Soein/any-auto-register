@@ -995,7 +995,31 @@ class KiroRegister:
             self.log("加载 Kiro Login ...")
             # 用 commit 只等首字节返回,后续靠 wait_for_selector 等关键按钮出现
             # 避免代理对 SPA 子资源(CDN/fonts/analytics)加载慢导致 domcontentloaded 永远触发不了
-            page.goto(KIRO_SIGNIN_URL, wait_until="commit", timeout=60000)
+            # resin 代理池坏节点 ~20% 概率, 对 ERR_TUNNEL/ERR_CONNECTION 自动重试 3 次
+            _goto_attempt = 0
+            while True:
+                _goto_attempt += 1
+                try:
+                    page.goto(KIRO_SIGNIN_URL, wait_until="commit", timeout=60000)
+                    break
+                except Exception as goto_err:
+                    msg = str(goto_err)
+                    retryable = any(
+                        tag in msg
+                        for tag in (
+                            "ERR_TUNNEL_CONNECTION_FAILED",
+                            "ERR_CONNECTION_CLOSED",
+                            "ERR_CONNECTION_RESET",
+                            "ERR_EMPTY_RESPONSE",
+                            "ERR_PROXY_CONNECTION_FAILED",
+                            "ERR_TIMED_OUT",
+                        )
+                    )
+                    if retryable and _goto_attempt < 3:
+                        self.log(f"[KIRO] goto 失败(第{_goto_attempt}次), 重试: {msg.splitlines()[0]}")
+                        time.sleep(2)
+                        continue
+                    raise
             self.log("等待 Builder ID 按钮渲染 ...")
             try:
                 page.wait_for_selector("text=Builder ID", timeout=90000)
