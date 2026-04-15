@@ -26,9 +26,10 @@ class KiroPlatform(BasePlatform):
 
         proxy = self.config.proxy
         laoudo_account_id = self.config.extra.get("laoudo_account_id", "")
-        requested_headless = (self.config.executor_type or "protocol") != "headed"
-
-        reg = KiroRegister(proxy=proxy, tag="KIRO", headless=requested_headless)
+        # Kiro 对 headless 浏览器指纹返回空白页(已验证: page.content 0 字节, body 找不到)
+        # 无论前端选什么都强制 headed, 容器 entrypoint 已配 Xvfb 虚拟显示
+        _ = (self.config.executor_type or "protocol")  # 记录原值但不使用
+        reg = KiroRegister(proxy=proxy, tag="KIRO", headless=False)
         log_fn = getattr(self, "_log_fn", print)
         reg.log_fn = log_fn
 
