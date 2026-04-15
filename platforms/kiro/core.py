@@ -998,15 +998,32 @@ class KiroRegister:
                     ts = int(time.time())
                     shot = f"/runtime/debug/kiro_fail_{ts}.png"
                     html = f"/runtime/debug/kiro_fail_{ts}.html"
-                    page.screenshot(path=shot, full_page=True)
-                    with open(html, "w") as f:
-                        f.write(page.content())
-                    body_text = (page.inner_text("body") or "")[:500]
-                    self.log(f"[KIRO][DEBUG] URL={page.url} title='{page.title()}'")
-                    self.log(f"[KIRO][DEBUG] body_text(前500): {body_text!r}")
-                    self.log(f"[KIRO][DEBUG] screenshot={shot} html={html}")
+                    # 1) URL/title (毫秒级,最重要)
+                    try:
+                        self.log(f"[KIRO][DEBUG] URL={page.url} title={page.title()!r}")
+                    except Exception as e:
+                        self.log(f"[KIRO][DEBUG] url/title fail: {e}")
+                    # 2) HTML 落盘 (不依赖字体)
+                    try:
+                        with open(html, "w") as f:
+                            f.write(page.content())
+                        self.log(f"[KIRO][DEBUG] html={html}")
+                    except Exception as e:
+                        self.log(f"[KIRO][DEBUG] html fail: {e}")
+                    # 3) body 文本
+                    try:
+                        body_text = (page.inner_text("body") or "")[:500]
+                        self.log(f"[KIRO][DEBUG] body_text(前500): {body_text!r}")
+                    except Exception as e:
+                        self.log(f"[KIRO][DEBUG] body_text fail: {e}")
+                    # 4) 截图最后做, 短超时, 不等字体
+                    try:
+                        page.screenshot(path=shot, full_page=False, timeout=10000, animations="disabled")
+                        self.log(f"[KIRO][DEBUG] screenshot={shot}")
+                    except Exception as e:
+                        self.log(f"[KIRO][DEBUG] screenshot fail: {e}")
                 except Exception as dbg_err:
-                    self.log(f"[KIRO][DEBUG] 截图失败: {dbg_err}")
+                    self.log(f"[KIRO][DEBUG] 诊断失败: {dbg_err}")
                 raise wait_err
             self._human_sleep(1.9, 3.4)
 
