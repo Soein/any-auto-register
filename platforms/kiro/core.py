@@ -1249,14 +1249,39 @@ class KiroRegister:
                 self.log("点击 Allow 授权应用...")
                 allow_btn.click()
 
-            # 6. 等待返回 Kiro 拿 Token
+            # 6. 等待返回 Kiro 拿 Token (代理瞬时故障自动重试最多 3 次)
             self.log("等待回到 Kiro...")
-            try:
-                # 至少等它请求完 CompleteLogin
-                page.wait_for_url(re.compile(r"kiro\.dev"), timeout=30000)
-                self._human_sleep(3.0, 5.8)
-            except TimeoutError:
-                pass
+            _back_attempt = 0
+            while True:
+                _back_attempt += 1
+                try:
+                    # 至少等它请求完 CompleteLogin
+                    page.wait_for_url(re.compile(r"kiro\.dev"), timeout=30000)
+                    self._human_sleep(3.0, 5.8)
+                    break
+                except TimeoutError:
+                    break
+                except Exception as back_err:
+                    msg = str(back_err)
+                    retryable = any(
+                        tag in msg
+                        for tag in (
+                            "ERR_TUNNEL_CONNECTION_FAILED",
+                            "ERR_CONNECTION_CLOSED",
+                            "ERR_CONNECTION_RESET",
+                            "ERR_EMPTY_RESPONSE",
+                            "ERR_PROXY_CONNECTION_FAILED",
+                            "ERR_TIMED_OUT",
+                            "ERR_NAME_NOT_RESOLVED",
+                        )
+                    )
+                    if retryable and _back_attempt < 3:
+                        self.log(f"[KIRO] 回到 Kiro 过程代理故障(第{_back_attempt}次), 重试: {msg.splitlines()[0][:200]}")
+                        time.sleep(2)
+                        continue
+                    # 非可重试错误或重试耗尽, 不抛 — 后面用 page.url 判断是否真的回到 kiro
+                    self.log(f"[KIRO] 等待回到 Kiro 异常(不重试): {msg.splitlines()[0][:200]}")
+                    break
 
             if "kiro.dev" not in page.url:
                 err_text = ""
