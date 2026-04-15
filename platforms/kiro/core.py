@@ -675,6 +675,7 @@ class KiroRegister:
             "content-type": "application/json",
             "user-agent": "KiroIDE",
         }
+        # 1) 优先走 curl_cffi (更真实的浏览器指纹)
         if cffi_requests is not None:
             kwargs: dict[str, Any] = {
                 "json": payload,
@@ -686,13 +687,27 @@ class KiroRegister:
                 proxies = build_requests_proxy_config(self.proxy)
                 if proxies:
                     kwargs["proxies"] = proxies
-            response = cffi_requests.post(url, **kwargs)
-            if response.status_code != 200:
-                raise RuntimeError(
-                    f"HTTP {response.status_code}: {response.text[:300]}"
+            try:
+                response = cffi_requests.post(url, **kwargs)
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"HTTP {response.status_code}: {response.text[:300]}"
+                    )
+                return response.json()
+            except Exception as e:
+                # curl_cffi 的 BoringSSL TLS 错误在某些代理环境下触发,降级 urllib
+                msg = str(e)
+                tls_err = (
+                    "OPENSSL_internal" in msg
+                    or "invalid library" in msg
+                    or "curl: (35)" in msg
+                    or "TLS connect error" in msg
                 )
-            return response.json()
+                if not tls_err:
+                    raise
+                self.log(f"[KIRO] curl_cffi TLS 失败, 降级 urllib: {msg.splitlines()[0][:200]}")
 
+        # 2) urllib 兜底
         data = json.dumps(payload).encode("utf-8")
         opener = build_opener()
         request = Request(url, data=data, headers=headers, method="POST")
