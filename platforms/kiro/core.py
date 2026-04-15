@@ -990,10 +990,7 @@ class KiroRegister:
             # 避免代理对 SPA 子资源(CDN/fonts/analytics)加载慢导致 domcontentloaded 永远触发不了
             page.goto(KIRO_SIGNIN_URL, wait_until="commit", timeout=60000)
             self.log("等待 Builder ID 按钮渲染 ...")
-            page.wait_for_selector(
-                'button:has-text("Builder ID"), text="AWS Builder ID"',
-                timeout=90000,
-            )
+            page.wait_for_selector("text=Builder ID", timeout=90000)
             self._human_sleep(1.9, 3.4)
 
             # Debug: dump all buttons to log
