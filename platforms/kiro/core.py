@@ -245,7 +245,14 @@ class KiroRegister:
             ],
         }
         if self.proxy:
-            launch_opts["proxy"] = {"server": self.proxy}
+            # Chromium 不认 URL 内嵌账密 (ERR_INVALID_AUTH_CREDENTIALS), 必须拆成 username/password 参数
+            _p = urlparse(self.proxy)
+            _proxy_opts: dict[str, Any] = {"server": f"{_p.scheme}://{_p.hostname}:{_p.port}"}
+            if _p.username:
+                _proxy_opts["username"] = _p.username
+            if _p.password:
+                _proxy_opts["password"] = _p.password
+            launch_opts["proxy"] = _proxy_opts
 
         self.browser = self.pw.chromium.launch(**launch_opts)
         profile = self._build_random_profile()
