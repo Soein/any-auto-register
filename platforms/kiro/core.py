@@ -990,7 +990,24 @@ class KiroRegister:
             # 避免代理对 SPA 子资源(CDN/fonts/analytics)加载慢导致 domcontentloaded 永远触发不了
             page.goto(KIRO_SIGNIN_URL, wait_until="commit", timeout=60000)
             self.log("等待 Builder ID 按钮渲染 ...")
-            page.wait_for_selector("text=Builder ID", timeout=90000)
+            try:
+                page.wait_for_selector("text=Builder ID", timeout=90000)
+            except Exception as wait_err:
+                try:
+                    os.makedirs("/runtime/debug", exist_ok=True)
+                    ts = int(time.time())
+                    shot = f"/runtime/debug/kiro_fail_{ts}.png"
+                    html = f"/runtime/debug/kiro_fail_{ts}.html"
+                    page.screenshot(path=shot, full_page=True)
+                    with open(html, "w") as f:
+                        f.write(page.content())
+                    body_text = (page.inner_text("body") or "")[:500]
+                    self.log(f"[KIRO][DEBUG] URL={page.url} title='{page.title()}'")
+                    self.log(f"[KIRO][DEBUG] body_text(前500): {body_text!r}")
+                    self.log(f"[KIRO][DEBUG] screenshot={shot} html={html}")
+                except Exception as dbg_err:
+                    self.log(f"[KIRO][DEBUG] 截图失败: {dbg_err}")
+                raise wait_err
             self._human_sleep(1.9, 3.4)
 
             # Debug: dump all buttons to log
