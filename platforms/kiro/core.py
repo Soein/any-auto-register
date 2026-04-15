@@ -1082,13 +1082,42 @@ class KiroRegister:
             except Exception as e:
                 self.log(f"Debug UI failed: {e}")
 
-            if page.locator('button:has-text("Builder ID")').count() > 0:
-                page.click('button:has-text("Builder ID")')
-            elif page.locator('text="AWS Builder ID"').count() > 0:
-                page.locator('text="AWS Builder ID"').first.click()
-
-            self.log("等待跳转到 AWS SSO ...")
-            page.wait_for_url(re.compile(r"signin\.aws"), timeout=60000)
+            # 点 Builder ID → 跳 AWS SSO, 代理瞬时故障 (ERR_TUNNEL_*) 自动重试 3 次
+            _sso_attempt = 0
+            while True:
+                _sso_attempt += 1
+                try:
+                    if page.locator('button:has-text("Builder ID")').count() > 0:
+                        page.click('button:has-text("Builder ID")')
+                    elif page.locator('text="AWS Builder ID"').count() > 0:
+                        page.locator('text="AWS Builder ID"').first.click()
+                    self.log("等待跳转到 AWS SSO ...")
+                    page.wait_for_url(re.compile(r"signin\.aws"), timeout=60000)
+                    break
+                except Exception as sso_err:
+                    msg = str(sso_err)
+                    retryable = any(
+                        tag in msg
+                        for tag in (
+                            "ERR_TUNNEL_CONNECTION_FAILED",
+                            "ERR_CONNECTION_CLOSED",
+                            "ERR_CONNECTION_RESET",
+                            "ERR_EMPTY_RESPONSE",
+                            "ERR_PROXY_CONNECTION_FAILED",
+                            "ERR_TIMED_OUT",
+                            "ERR_NAME_NOT_RESOLVED",
+                        )
+                    )
+                    if retryable and _sso_attempt < 3:
+                        self.log(f"[KIRO] SSO 跳转失败(第{_sso_attempt}次), 返回 Kiro 登录页重试: {msg.splitlines()[0][:200]}")
+                        time.sleep(2)
+                        try:
+                            page.goto(KIRO_SIGNIN_URL, wait_until="commit", timeout=60000)
+                            page.wait_for_selector("text=Builder ID", timeout=60000)
+                        except Exception as reload_err:
+                            self.log(f"[KIRO] 重试回到登录页也失败: {reload_err!s}"[:300])
+                        continue
+                    raise
             self._accept_cookie_banner_if_present(page)
             self._solve_captcha_if_exists(page)
 
