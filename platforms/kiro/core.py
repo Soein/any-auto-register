@@ -1276,8 +1276,12 @@ class KiroRegister:
                         )
                     )
                     if retryable and _back_attempt < 3:
-                        self.log(f"[KIRO] 回到 Kiro 过程代理故障(第{_back_attempt}次), 重试: {msg.splitlines()[0][:200]}")
+                        self.log(f"[KIRO] 回到 Kiro 过程代理故障(第{_back_attempt}次), 主动导航回 Kiro 重试: {msg.splitlines()[0][:200]}")
                         time.sleep(2)
+                        try:
+                            page.goto("https://app.kiro.dev/", wait_until="commit", timeout=30000)
+                        except Exception:
+                            pass
                         continue
                     # 非可重试错误或重试耗尽, 不抛 — 后面用 page.url 判断是否真的回到 kiro
                     self.log(f"[KIRO] 等待回到 Kiro 异常(不重试): {msg.splitlines()[0][:200]}")
@@ -1308,7 +1312,10 @@ class KiroRegister:
                 except Exception:
                     pass
 
-                return False, {"error": f"Failed to return to kiro.dev - {err_text}"}
+                # 此时 AWS Builder ID 已创建(邮箱/姓名/验证码/密码都已完成)
+                # 只是没拿到 token, 降级为警告而非失败
+                self.log(f"⚠️ 回到 Kiro 失败(AWS 账号已创建), 跳过 token 抓取: {err_text}")
+                return True, {"warning": "AWS 账号已创建但未获取 token (代理问题)"}
 
             self._capture_kiro_web_tokens(page)
 
