@@ -1055,6 +1055,17 @@ class ChatGPTClient:
 
             if self._is_registration_complete_state(state):
                 self.last_registration_state = state
+                if state.page_type == "external_url" or self._state_requires_navigation(state):
+                    self._log("注册完成命中 callback URL，跟进让 chatgpt.com session 真正落地...")
+                    ok, followed = self._follow_flow_state(
+                        state,
+                        referer=state.current_url or f"{self.AUTH}/about-you",
+                    )
+                    if ok:
+                        self.last_registration_state = followed
+                        self._log(f"callback 跟进完成: {describe_flow_state(followed)}")
+                    else:
+                        self._log(f"callback 跟进失败: {followed}（session 可能不完整）", "warning")
                 self._log("[OK] 注册流程完成")
                 return True, "注册成功"
 
