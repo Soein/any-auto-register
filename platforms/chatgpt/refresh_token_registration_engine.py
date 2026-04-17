@@ -510,7 +510,7 @@ class RefreshTokenRegistrationEngine:
                     last_name,
                     birthdate,
                     email_adapter,
-                    stop_before_about_you_submission=True,
+                    stop_before_about_you_submission=False,
                     otp_wait_timeout=register_otp_wait_seconds,
                     otp_resend_wait_timeout=register_otp_resend_wait_seconds,
                 )
@@ -538,8 +538,8 @@ class RefreshTokenRegistrationEngine:
                     self._log("注册状态机已推进至 about_you，符合预期。下一步进入 OAuth 会话补全资料")
                 else:
                     self._log(
-                        "注册状态机返回成功但未停在 about_you。"
-                        "将继续进入 OAuth 会话，按状态机实际返回推进。"
+                        "注册状态机跑完 about_you（session 已完整登录）。"
+                        "下一步透传 session 给 OAuthClient，尝试用 codex client_id 直接换 refresh_token（绕过 add_phone 风控）"
                     )
 
             oauth_client = self._build_oauth_client()
@@ -552,9 +552,7 @@ class RefreshTokenRegistrationEngine:
                 register_otp_resend_wait_seconds,
             )
 
-            use_continued_session = registered and (
-                registration_message == "pending_about_you_submission"
-            )
+            use_continued_session = bool(registered)
 
             if use_continued_session:
                 self._reuse_register_browser_context(register_client, oauth_client)
